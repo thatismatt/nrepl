@@ -14,6 +14,7 @@
                                  response-values
                                  url-connect]]
    [nrepl.ack :as ack]
+   [nrepl.misc :refer [uuid]]
    [nrepl.server :as server]
    [nrepl.transport :as transport])
   (:import
@@ -582,3 +583,31 @@
     (Thread/sleep 100)
     (is (= #{"done"} (-> session (message {:op :interrupt}) first :status set)))
     (is (= #{"done" "interrupted"} (-> resp combine-responses :status)))))
+
+(defn eval-with [session code resources classes]
+  (let [eval-id (uuid)
+        loader-id (uuid)
+        _ (session {:id loader-id :op :sideloader-start})
+        msgs (session {:id eval-id :op :eval :code (pr-str code)})]
+    (->> msgs
+         (remove (fn [{:keys [id status type name]}]
+                   (when (and (= id loader-id) (some #{"sideloader-lookup"} status))
+                     (when-some [^String res (when (= type "resource") (resources name))]
+                       (session {:id (uuid)
+                                 :op :sideloader-provide
+                                 :type type
+                                 :name name
+                                 :content (-> res (.getBytes "UTF-8") java.io.ByteArrayInputStream.
+                                              nrepl.middleware.sideloader/base64-encode)})))
+                   (not= id eval-id)))
+         (reduce (fn [v {:keys [id status value]}]
+                   (cond-> (or v value)
+                     (some #{"done"} status) reduced)) nil)
+         read-string)))
+
+(def-repl-test sideloader
+  ; resources
+  (is (= "Hello nREPL" (eval-with
+                        session
+                        '(slurp (.getResourceAsStream (.getContextClassLoader (Thread/currentThread)) "hello"))
+                        {"hello" "Hello nREPL"} {}))))

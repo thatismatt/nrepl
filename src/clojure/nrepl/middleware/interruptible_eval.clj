@@ -2,6 +2,7 @@
   {:author "Chas Emerick"}
   (:require
    clojure.main
+   [clojure.java.io :as io]
    [nrepl.middleware :refer [set-descriptor!]]
    nrepl.middleware.pr-values
    [nrepl.misc :refer [response-for returning]]
@@ -46,6 +47,24 @@
     (when column (set-column! reader (int column)))
     reader))
 
+(defn classloader
+  "Creates a classloader that obey standard delegating policy.
+   Takes two arguments: a parent classloader and a function which
+   takes a keyword (:resource or :class) and a string (a resource or a class name) and returns an array of bytes
+   or nil."
+  [parent f]
+  (proxy [clojure.lang.DynamicClassLoader] [parent]
+    (findResource [name]
+      (when-some  [bytes (f :resource name)]
+        (let [file (doto (java.io.File/createTempFile "unrepl-sideload-" (str "-" (re-find #"[^/]*$" name)))
+                     .deleteOnExit)]
+          (io/copy bytes file)
+          (-> file .toURI .toURL))))
+    (findClass [name]
+      (if-some  [bytes (f :class name)]
+        (.defineClass ^clojure.lang.DynamicClassLoader this name bytes nil)
+        (throw (ClassNotFoundException. name))))))
+
 (defn evaluate
   "Evaluates a msg's code within the dynamic context of its session.
 
@@ -71,9 +90,14 @@
                         (-> (get-thread-bindings)
                             (into @session)
                             (cond-> explicit-ns (assoc #'*ns* explicit-ns)
-                                    file (assoc #'*file* file)))]
+                                    file (assoc #'*file* file)))
+                        cl (classloader (.getContextClassLoader (Thread/currentThread))
+                                        (fn [type name]
+                                          (when-some [f (:sideloader/resolve (meta session))]
+                                            (f type name))))]
                     (pop-thread-bindings)
-                    (push-thread-bindings bindings))
+                    (push-thread-bindings bindings)
+                    (.setContextClassLoader (Thread/currentThread) cl))
            :read (if (string? code)
                    (let [reader (source-logging-pushback-reader code line column)]
                      #(read {:read-cond :allow :eof %2} reader))
