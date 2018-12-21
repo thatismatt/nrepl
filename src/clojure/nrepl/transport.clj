@@ -110,6 +110,106 @@
             (.close in)
             (.close out))))))))
 
+(defn- lexicographically
+  [#^"[B" a #^"[B" b]
+  (let [alen (alength a)
+        blen (alength b)
+        len  (min alen blen)]
+    (loop [i 0]
+      (if (== i len)
+        (- alen blen)
+        (let [x (- (int (aget a i)) (int (aget b i)))]
+          (if (zero? x)
+            (recur (inc i))
+            x))))))
+
+(defn- ^String as-string [x]
+  (str (if (keyword? x) (symbol x) x)))
+
+(defn print-bencode-utf8
+  "bencode over utf8 stream"
+  [x]
+  (cond
+    (integer? x) (doto *out* (.write (int \i)) (.write (str x)) (.write (int \e)))
+    (or (string? x) (keyword? x) (symbol? x))
+    (let [s (as-string x)
+          n (count (.getBytes s "UTF-8"))]
+      (doto *out*
+        (.write (str n))
+        (.write (int \:))
+        (.write s)))
+    (map? x)
+    (let [a (to-array (for [[k v] x] [(.getBytes (as-string k) "UTF-8") v]))
+          a (sort-by first lexicographically a)] ; beware: mutable sort
+      (.write *out* (int \d))
+      (doseq [[^bytes k v] a]
+        (print-bencode-utf8 (String. k "UTF-8")) (print-bencode-utf8 v))
+      (.write *out* (int \e)))
+    (or (nil? x) (seq? x) (coll? x))
+    (do
+      (.write *out* (int \l))
+      (doseq [x x] (print-bencode-utf8 x))
+      (.write *out* (int \e)))
+    :else (throw (ex-info (str "Unexpected value passed to print-bencode-utf8: " x) {:v x}))))
+
+(defn- read-bencode-int-utf8 []
+  (loop [n 0]
+    (let [c (.read *in*)
+          d (- c (int \0))]
+      (if (<= 0 d 9)
+        (recur (+ (* 10 n) d))
+        (do
+          (.unread *in* c)
+          n)))))
+
+(defn- read-bencode-string-utf8 []
+  (let [n (read-bencode-int-utf8)
+        sb (StringBuilder. n)]
+    (prn "REDA" n)
+    (.read *in*) ; skip \:
+    (loop [n n surrogate false]
+      (if (zero? n)
+        (str sb)
+        (let [c (.read *in*)
+              ch (char c)]
+          (.append sb ch)
+          (cond
+            surrogate (recur (- n 4) false)
+            (zero? (bit-and -0x80 c)) (recur (- n 1) false)
+            (zero? (bit-and -0x800 c)) (recur (- n 2) false)
+            (Character/isHighSurrogate ch) (recur n true)
+            :else (recur (- n 3) false)))))))
+
+(defn read-bencode-utf8
+  "bencode over utf8 stream"
+  []
+  (let [c (.read *in*)]
+    (when-not (neg? c)
+      (case (char c)
+        \i (let [n (read-bencode-int-utf8)] (.read *in*) n)
+        \l (loop [v []]
+             (let [c (.read *in*)]
+               (if (= (int \e) c)
+                 v
+                 (do
+                   (.unread *in* c)
+                   (recur (conj v (read-bencode-utf8)))))))
+        \d (loop [m {}]
+             (let [c (.read *in*)]
+               (if (= (int \e) c)
+                 m
+                 (do
+                   (.unread *in* c)
+                   (recur (assoc m (read-bencode-string-utf8) (read-bencode-utf8)))))))
+        (do
+          (.unread *in* c)
+          (read-bencode-string-utf8))))))
+
+#_(defn bencode-upgrade
+    "Returns a Transport implementation that serializes messages
+   over *in* and *out*."
+    [])
+
 (defn tty
   "Returns a Transport implementation suitable for serving an nREPL backend
    via simple in/out readers, as with a tty or telnet connection."
