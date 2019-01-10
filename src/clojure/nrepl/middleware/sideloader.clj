@@ -67,11 +67,10 @@
         "sideloader-provide"
         (if-some [p (@pending [type name])]
           (do
-            (deliver p (base64-decode content))
+            (deliver p (some-> content base64-decode))
             (swap! pending dissoc [type name])
             (t/send transport (response-for msg {:status :done})))
           (do
-            (println (pr-str 'RECV type name))
             (t/send transport (response-for msg {:status #{:done :unexpected-provide}
                                                  :type type
                                                  :name name}))))
