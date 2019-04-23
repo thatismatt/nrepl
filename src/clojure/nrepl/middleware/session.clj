@@ -160,9 +160,7 @@
      Upon succesful interruption the backing thread is replaced.
    * :close, terminates the backing thread."
   [id]
-  (let [cl (clojure.lang.DynamicClassLoader.
-            (.getContextClassLoader (Thread/currentThread)))
-        queue (LinkedBlockingQueue.)
+  (let [queue (LinkedBlockingQueue.)
         running (atom nil)
         thread (atom nil)
         main-loop #(let [[exec-id ^Runnable r ^Runnable ack] (.take queue)]
@@ -176,7 +174,7 @@
                        (recur)))
         spawn-thread #(doto (Thread. main-loop (str "nRepl-session-" id))
                         (.setDaemon true)
-                        (.setContextClassLoader cl)
+                        (.setContextClassLoader (clojure.lang.RT/baseLoader))
                         .start)]
     (reset! thread (spawn-thread))
     {:interrupt (fn [exec-id] ; nil means interrupt whatever is running
